@@ -62,7 +62,7 @@ function parseCards(html) { var out = [], seen = {}, re = /<a[^>]+href=["'](?:ht
 
 function extractJsonArrayAfter(html, marker) { var p = html.indexOf(marker); if (p < 0) return []; var s = html.indexOf("[", p); if (s < 0) return []; var depth = 0, q = false, e = false; for (var i = s; i < html.length; i += 1) { var c = html[i]; if (q) { if (e) e = false; else if (c === "\\") e = true; else if (c === '"') q = false; } else if (c === '"') q = true; else if (c === "[") depth += 1; else if (c === "]" && --depth === 0) { try { return JSON.parse(html.slice(s, i + 1)); } catch (x) { return []; } } } return []; }
 
-function parseSearchGroups(html) { var list = extractJsonArrayAfter(html, '"searchList"'); var groups = {}; list.forEach(function (entry) { var d = entry && entry.video_data; if (!d || !d.series_id) return; var title = String(d.series_title || entry.name || "红果短剧"); var base = normalizeSeriesTitle(title); var key = base || title; if (!groups[key]) groups[key] = { title: base || title, entries: [], cover: decodeUrl(d.series_cover || ""), hot: d.hot_score_data && d.hot_score_data.text, tags: [] }; var g = groups[key]; if (!g.entries.some(function (x) { return x.seriesId === String(d.series_id); })) g.entries.push({ seriesId: String(d.series_id), title: title }); if (!g.cover) g.cover = decodeUrl(d.series_cover || ""); (Array.isArray(d.category_list) ? d.category_list : []).forEach(function (x) { if (x.name && g.tags.indexOf(x.name) < 0) g.tags.push(x.name); }); }); return Object.keys(groups).map(function (key) { var g = groups[key]; var cacheKey = HG_GROUP_CACHE + encodeURIComponent(key); try { Widget.storage.set(cacheKey, g); } catch (x) {} return makeCard("hg320-group:" + encodeURIComponent(key), g.title, g.cover, [g.hot, g.entries.length + "季", g.tags.join(" · ")].filter(Boolean).join(" · "), "hg320-group:" + encodeURIComponent(key)); }); }
+function parseSearchGroups(html) { var list = extractJsonArrayAfter(html, '"searchList"'); var groups = {}; list.forEach(function (entry) { var d = entry && entry.video_data; if (!d || !d.series_id) return; var title = String(d.series_title || entry.name || "红果短剧"); var base = normalizeSeriesTitle(title); var key = base || title; if (!groups[key]) groups[key] = { title: base || title, entries: [], cover: decodeUrl(d.series_cover || ""), hot: d.hot_score_data && d.hot_score_data.text, tags: [] }; var g = groups[key]; var seasonTitle = title; var hot = d.hot_score_data && d.hot_score_data.text; if (!g.entries.some(function (x) { return x.seriesId === String(d.series_id); })) g.entries.push({ seriesId: String(d.series_id), title: seasonTitle, hot: hot }); if (!g.cover) g.cover = decodeUrl(d.series_cover || ""); (Array.isArray(d.category_list) ? d.category_list : []).forEach(function (x) { if (x.name && g.tags.indexOf(x.name) < 0) g.tags.push(x.name); }); }); return Object.keys(groups).map(function (key) { var g = groups[key]; var cacheKey = HG_GROUP_CACHE + encodeURIComponent(key); try { Widget.storage.set(cacheKey, g); } catch (x) {} return makeCard("hg320-group:" + encodeURIComponent(key), g.title, g.cover, [g.hot, g.entries.length + "季", g.tags.join(" · ")].filter(Boolean).join(" · "), "hg320-group:" + encodeURIComponent(key)); }); }
 
 async function loadPath(path) { var x = parseCards(await getHtml(HG_SITE + path)); if (!x.length) throw new Error("没有找到红果短剧"); return x; }
 async function loadHot(params) { return loadPath("/"); }
@@ -79,30 +79,46 @@ async function loadDetail(link) {
     var group = null;
     try { group = Widget.storage.get(HG_GROUP_CACHE + encodeURIComponent(key)); } catch (x) {}
     if (!group) throw new Error("系列缓存已失效，请重新搜索");
-    var all = [];
+    // 季选择层: 每一季作为一个可点条目, 带集数与热度
+    var seasons = [];
     for (var i = 0; i < group.entries.length; i += 1) {
       var e = group.entries[i];
-      var html = await getHtml(HG_SITE + "/detail?series_id=" + e.seriesId);
-      var vids = getVids(html);
-      var cover = getCover(html) || group.cover;
-      vids.forEach(function (vid, index) {
-        var player = HG_SITE + "/player/" + e.seriesId + "/" + vid;
-        all.push({ id: player, type: "tmdb", mediaType: "tv", title: e.title + " 第" + (index + 1) + "集", episode: index + 1, seriesName: group.title, coverUrl: cover, posterPath: cover, backdropPath: cover, link: player });
-      });
+      var sHtml = await getHtml(HG_SITE + "/detail?series_id=" + e.seriesId);
+      var sVids = getVids(sHtml);
+      var sCover = getCover(sHtml) || group.cover;
+      var meta = [e.hot, sVids.length + "集"].filter(Boolean).join(" · ");
+      seasons.push({ id: "hg320-season:" + e.seriesId + ":" + i, type: "tmdb", mediaType: "tv", title: "第" + (i + 1) + "季 · " + (e.title || group.title), description: meta, episode: i + 1, seriesName: group.title, coverUrl: sCover, posterPath: sCover, backdropPath: sCover, link: "hg320-season:" + e.seriesId + ":" + i });
     }
-    return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季 · " + all.length + " 集", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, episodeItems: all };
+    return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, episodeItems: seasons };
+  }
+  var sm2 = raw.match(/^hg320-season:(\d+):(\d+)$/);
+  if (sm2) {
+    // 点某一季: 展开该季的集列表
+    var sid = sm2[1], html = await getHtml(HG_SITE + "/detail?series_id=" + sid), title = getTitle(html), cover = getCover(html), vids = getVids(html);
+    if (!vids.length) throw new Error("没有找到该剧集目录");
+    var items = [];
+    for (var k = 0; k < vids.length; k += 1) items.push(await buildEpisode(sid, title, cover, vids[k], k));
+    return { id: raw, type: "tmdb", title: title, description: "共 " + vids.length + " 集", coverUrl: cover, posterPath: cover, backdropPath: cover, link: raw, episodeItems: items };
   }
   var sm = raw.match(/^hg320-series:(\d+)$/);
   if (sm) {
-    var sid = sm[1], html = await getHtml(HG_SITE + "/detail?series_id=" + sid), title = getTitle(html), cover = getCover(html), vids = getVids(html);
-    if (!vids.length) throw new Error("没有找到该剧集目录");
-    return { id: raw, type: "tmdb", title: title, description: "共 " + vids.length + " 集", coverUrl: cover, posterPath: cover, backdropPath: cover, link: raw, episodeItems: vids.map(function (vid, i) { var player = HG_SITE + "/player/" + sid + "/" + vid; return { id: player, type: "tmdb", mediaType: "tv", title: title + " 第" + (i + 1) + "集", episode: i + 1, seriesName: title, coverUrl: cover, posterPath: cover, backdropPath: cover, link: player }; }) };
+    var sid2 = sm[1], html2 = await getHtml(HG_SITE + "/detail?series_id=" + sid2), title2 = getTitle(html2), cover2 = getCover(html2), vids2 = getVids(html2);
+    if (!vids2.length) throw new Error("没有找到该剧集目录");
+    var items2 = [];
+    for (var k2 = 0; k2 < vids2.length; k2 += 1) items2.push(await buildEpisode(sid2, title2, cover2, vids2[k2], k2));
+    return { id: raw, type: "tmdb", title: title2, description: "共 " + vids2.length + " 集", coverUrl: cover2, posterPath: cover2, backdropPath: cover2, link: raw, episodeItems: items2 };
   }
   var pm = raw.match(/^https?:\/\/hongguoduanju\.com\/player\/(\d+)\/(\d+)\/?$/i);
   if (!pm) return null;
-  var play = await getPlayUrl(pm[1], pm[2]);
-  // Rex 适配: 单集播放对象 type 改 tmdb，保留 videoUrl + playerType
-  return { id: raw, type: "tmdb", mediaType: "tv", title: "红果短剧", description: "红果短剧播放资源", link: raw, videoUrl: play, playerType: "system" };
+  return { id: raw, type: "tmdb", mediaType: "tv", title: "红果短剧", description: "红果短剧播放资源", link: raw, videoUrl: await getPlayUrl(pm[1], pm[2]), playerType: "system" };
+}
+
+// 单集对象: 直接带 videoUrl，使 Rex 无需二次 loadResource 即可播放
+async function buildEpisode(seriesId, title, cover, vid, index) {
+  var player = HG_SITE + "/player/" + seriesId + "/" + vid;
+  var item = { id: player, type: "tmdb", mediaType: "tv", title: title + " 第" + (index + 1) + "集", episode: index + 1, seriesName: title, coverUrl: cover, posterPath: cover, backdropPath: cover, link: player };
+  try { item.videoUrl = await getPlayUrl(seriesId, vid); item.playerType = "system"; } catch (x) { /* 留空，详情页仍可重试 */ }
+  return item;
 }
 
 // Rex 适配: loadResource 返回 Rex 播放器认的 {url, playerType} 结构
