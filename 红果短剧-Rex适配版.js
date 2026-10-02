@@ -96,25 +96,22 @@ async function loadDetail(link) {
     var group = null;
     try { group = Widget.storage.get(HG_GROUP_CACHE + encodeURIComponent(key)); } catch (x) {}
     if (!group) throw new Error("系列缓存已失效，请重新搜索");
-    // 季选择层: 每一季作为一个可点条目, 带集数与热度
+    // 季选择层: 直接用搜索时缓存的季信息生成条目，不在此发网络请求（避免 Rex 执行超时转圈）
     var seasons = [];
     for (var i = 0; i < group.entries.length; i += 1) {
       var e = group.entries[i];
-      var sHtml = await getHtml(HG_SITE + "/detail?series_id=" + e.seriesId);
-      var sVids = await getChapterIds(e.seriesId);
-      var sCover = getCover(sHtml) || group.cover;
-      var meta = [e.hot, sVids.length + "集"].filter(Boolean).join(" · ");
-      seasons.push({ id: "hg320-season:" + e.seriesId + ":" + i, type: "tmdb", mediaType: "tv", title: "第" + (i + 1) + "季 · " + (e.title || group.title), description: meta, episode: i + 1, seriesName: group.title, coverUrl: sCover, posterPath: sCover, backdropPath: sCover, link: "hg320-season:" + e.seriesId + ":" + i });
+      var meta = [e.hot, "点击查看分集"].filter(Boolean).join(" · ");
+      seasons.push({ id: "hg320-season:" + e.seriesId + ":" + i, type: "tmdb", mediaType: "tv", title: "第" + (i + 1) + "季 · " + (e.title || group.title), description: meta, episode: i + 1, seriesName: group.title, coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: "hg320-season:" + e.seriesId + ":" + i });
     }
     return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, episodeItems: seasons };
   }
   var sm2 = raw.match(/^hg320-season:(\d+):(\d+)$/);
   if (sm2) {
-    // 点某一季: 展开该季的集列表
+    // 点某一季: 展开该季的集列表（仅 1 次 landing 请求，不逐集预拉 play_url）
     var sid = sm2[1], html = await getHtml(HG_SITE + "/detail?series_id=" + sid), title = getTitle(html), cover = getCover(html), vids = await getChapterIds(sid);
     if (!vids.length) throw new Error("没有找到该剧集目录");
     var items = [];
-    for (var k = 0; k < vids.length; k += 1) items.push(await buildEpisode(sid, title, cover, vids[k], k));
+    for (var k = 0; k < vids.length; k += 1) items.push(makeEpisode(sid, title, cover, vids[k], k));
     return { id: raw, type: "tmdb", title: title, description: "共 " + vids.length + " 集", coverUrl: cover, posterPath: cover, backdropPath: cover, link: raw, episodeItems: items };
   }
   var sm = raw.match(/^hg320-series:(\d+)$/);
@@ -122,20 +119,22 @@ async function loadDetail(link) {
     var sid2 = sm[1], html2 = await getHtml(HG_SITE + "/detail?series_id=" + sid2), title2 = getTitle(html2), cover2 = getCover(html2), vids2 = await getChapterIds(sid2);
     if (!vids2.length) throw new Error("没有找到该剧集目录");
     var items2 = [];
-    for (var k2 = 0; k2 < vids2.length; k2 += 1) items2.push(await buildEpisode(sid2, title2, cover2, vids2[k2], k2));
+    for (var k2 = 0; k2 < vids2.length; k2 += 1) items2.push(makeEpisode(sid2, title2, cover2, vids2[k2], k2));
     return { id: raw, type: "tmdb", title: title2, description: "共 " + vids2.length + " 集", coverUrl: cover2, posterPath: cover2, backdropPath: cover2, link: raw, episodeItems: items2 };
+  }
+  var cm = raw.match(/^hg320-chapter:(\d+):(\d+)$/);
+  if (cm) {
+    // 点某一集: 仅此 1 个请求拿播放地址，返回内联播放对象
+    return { id: raw, type: "tmdb", mediaType: "tv", title: "红果短剧", description: "红果短剧播放资源", link: raw, videoUrl: await getPlayUrl(cm[1], cm[2]), playerType: "system" };
   }
   var pm = raw.match(/^https?:\/\/hongguoduanju\.com\/player\/(\d+)\/(\d+)\/?$/i);
   if (!pm) return null;
   return { id: raw, type: "tmdb", mediaType: "tv", title: "红果短剧", description: "红果短剧播放资源", link: raw, videoUrl: await getPlayUrl(pm[1], pm[2]), playerType: "system" };
 }
 
-// 单集对象: 直接带 videoUrl，使 Rex 无需二次 loadResource 即可播放
-async function buildEpisode(seriesId, title, cover, vid, index) {
-  var player = HG_SITE + "/player/" + seriesId + "/" + vid;
-  var item = { id: player, type: "tmdb", mediaType: "tv", title: title + " 第" + (index + 1) + "集", episode: index + 1, seriesName: title, coverUrl: cover, posterPath: cover, backdropPath: cover, link: player };
-  try { item.videoUrl = await getPlayUrl(seriesId, vid); item.playerType = "system"; } catch (x) { /* 留空，详情页仍可重试 */ }
-  return item;
+// 单集对象: 仅在生成条目时给出 link，点集时由 hg320-chapter 路由发 1 次请求拿 videoUrl（避免逐集预拉导致转圈）
+function makeEpisode(seriesId, title, cover, vid, index) {
+  return { id: "hg320-chapter:" + seriesId + ":" + vid, type: "tmdb", mediaType: "tv", title: title + " 第" + (index + 1) + "集", episode: index + 1, seriesName: title, coverUrl: cover, posterPath: cover, backdropPath: cover, link: "hg320-chapter:" + seriesId + ":" + vid };
 }
 
 // Rex 适配: loadResource 返回 Rex 播放器认的 {url, playerType} 结构
