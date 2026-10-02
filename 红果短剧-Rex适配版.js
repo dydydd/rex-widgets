@@ -97,38 +97,40 @@ async function loadDetail(link) {
     var group = null;
     try { group = Widget.storage.get(HG_GROUP_CACHE + encodeURIComponent(key)); } catch (x) {}
     if (!group) throw new Error("系列缓存已失效，请重新搜索");
-    // 用 childItems 把每季做成可下钻的季卡片 (Rex 原生支持 series->childItems(季)->episodeItems(集))
-    // 点某一季时 Rex 用该季 link 调 loadDetail (hg320-season:seriesId:index) 返回该季完整集列表
-    // 这样每季独立返回 episodeItems, 避免把所有季集一次性塞进 episodeItems 被 Rex 截断(只显示第一季)
-    var children = group.entries.map(function (ge, gi) {
+    // 关键: 每季的集直接内联进 childItems.episodeItems (不走下钻)
+    // Rex 点季卡片直接展开内联集, 不会再发请求调 loadDetail -> 不转圈
+    // (逆向确认 Rex 把 childItem.link 当播放地址而非下钻, 所以下钻方案在真机必转圈)
+    var perSeason = await Promise.all(group.entries.map(function (ge) {
+      return getChapterIds(ge.seriesId).then(function (vids) { return { ge: ge, vids: vids }; });
+    }));
+    var children = perSeason.map(function (p, gi) {
+      var ge = p.ge;
+      var items = p.vids.map(function (vid, vi) {
+        var player = HG_SITE + "/player/" + ge.seriesId + "/" + vid;
+        return { id: player, type: "tmdb", mediaType: "tv", title: (ge.title || group.title) + " 第" + (vi + 1) + "集", episode: vi + 1, seriesName: group.title, coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: player };
+      });
+      // link 用该季第一集 player URL: 若 Rex 把季卡片当资源直接播放也能播第一集; 否则展开内联 episodeItems
+      var seasonLink = items.length ? items[0].link : "hg320-season:" + ge.seriesId + ":" + gi;
       return {
         id: "hg320-season:" + ge.seriesId + ":" + gi,
         type: "tmdb", mediaType: "tv",
-        title: "第" + (gi + 1) + "季" + (group.entries.length > 1 ? "" : " · " + (ge.title || group.title)),
-        description: (ge.hot || "") + " 点击展开该季全集",
+        title: "第" + (gi + 1) + "季",
+        description: (ge.hot || "") + " 共" + items.length + "集",
         coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover,
-        link: "hg320-season:" + ge.seriesId + ":" + gi
+        link: seasonLink,
+        episodeItems: items
       };
     });
     return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, childItems: children };
   }
-  var sm2 = raw.match(/^hg320-season:(\d+):(\d+)$/);
-  if (sm2) {
-    var sid = sm2[1], html = await getHtml(HG_SITE + "/detail?series_id=" + sid), title = getTitle(html), cover = getCover(html), vids = getVids(html);
-    if (!vids.length) vids = await getChapterIds(sid);
-    if (!vids.length) throw new Error("没有找到该剧集目录");
-    var items = [];
-    for (var k = 0; k < vids.length; k += 1) items.push(makeEpisode(sid, title, cover, vids[k], k));
-    return { id: raw, type: "tmdb", title: title, description: "共 " + vids.length + " 集", coverUrl: cover, posterPath: cover, backdropPath: cover, link: raw, episodeItems: items };
-  }
   var sm = raw.match(/^hg320-series:(\d+)$/);
   if (sm) {
-    var sid2 = sm[1], html2 = await getHtml(HG_SITE + "/detail?series_id=" + sid2), title2 = getTitle(html2), cover2 = getCover(html2), vids2 = getVids(html2);
-    if (!vids2.length) vids2 = await getChapterIds(sid2);
+    // 只发 1 个 landing 请求拿完整集, 不抓详情页 (避免真机 Widget.http 跑详情页转圈)
+    var sid2 = sm[1], vids2 = await getChapterIds(sid2);
     if (!vids2.length) throw new Error("没有找到该剧集目录");
     var items2 = [];
-    for (var k2 = 0; k2 < vids2.length; k2 += 1) items2.push(makeEpisode(sid2, title2, cover2, vids2[k2], k2));
-    return { id: raw, type: "tmdb", title: title2, description: "共 " + vids2.length + " 集", coverUrl: cover2, posterPath: cover2, backdropPath: cover2, link: raw, episodeItems: items2 };
+    for (var k2 = 0; k2 < vids2.length; k2 += 1) items2.push(makeEpisode(sid2, "红果短剧 " + sid2, "", vids2[k2], k2));
+    return { id: raw, type: "tmdb", title: "红果短剧 " + sid2, description: "共 " + vids2.length + " 集", coverUrl: "", posterPath: "", backdropPath: "", link: raw, episodeItems: items2 };
   }
   var cm = raw.match(/^hg320-chapter:(\d+):(\d+)$/);
   if (cm) {
