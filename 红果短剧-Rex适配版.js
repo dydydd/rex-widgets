@@ -97,25 +97,20 @@ async function loadDetail(link) {
     var group = null;
     try { group = Widget.storage.get(HG_GROUP_CACHE + encodeURIComponent(key)); } catch (x) {}
     if (!group) throw new Error("系列缓存已失效，请重新搜索");
-    // 聚合所有季的集: 每集标题带"第N季 第M集"，link 用 player URL 交由 loadResource 解析
-    // (不依赖 Rex 下钻: 无论 Rex 是否把 group 当单对象处理，集列表都直接可用)
-    // 搜索结果里的 vid_list 只是预览(3个)，必须每季调 landing 接口拿完整 chapter_ids;
-    // 用 Promise.all 并发，避免多季串行超时转圈
-    var all = [];
-    var perSeason = await Promise.all(group.entries.map(function (ge) {
-      return getChapterIds(ge.seriesId).then(function (vids) { return { ge: ge, vids: vids }; });
-    }));
-    for (var gi = 0; gi < perSeason.length; gi += 1) {
-      var ge = perSeason[gi].ge;
-      var gCover = group.cover;
-      var gTitle = group.title;
-      var gVids = perSeason[gi].vids;
-      for (var vi = 0; vi < gVids.length; vi += 1) {
-        var gPlayer = HG_SITE + "/player/" + ge.seriesId + "/" + gVids[vi];
-        all.push({ id: gPlayer, type: "tmdb", mediaType: "tv", title: "第" + (gi + 1) + "季 · " + gTitle + " 第" + (vi + 1) + "集", episode: vi + 1, seriesName: group.title, coverUrl: gCover, posterPath: gCover, backdropPath: gCover, link: gPlayer });
-      }
-    }
-    return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季 · " + all.length + " 集", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, episodeItems: all };
+    // 用 childItems 把每季做成可下钻的季卡片 (Rex 原生支持 series->childItems(季)->episodeItems(集))
+    // 点某一季时 Rex 用该季 link 调 loadDetail (hg320-season:seriesId:index) 返回该季完整集列表
+    // 这样每季独立返回 episodeItems, 避免把所有季集一次性塞进 episodeItems 被 Rex 截断(只显示第一季)
+    var children = group.entries.map(function (ge, gi) {
+      return {
+        id: "hg320-season:" + ge.seriesId + ":" + gi,
+        type: "tmdb", mediaType: "tv",
+        title: "第" + (gi + 1) + "季" + (group.entries.length > 1 ? "" : " · " + (ge.title || group.title)),
+        description: (ge.hot || "") + " 点击展开该季全集",
+        coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover,
+        link: "hg320-season:" + ge.seriesId + ":" + gi
+      };
+    });
+    return { id: raw, type: "tmdb", title: group.title, description: "共 " + group.entries.length + " 季", coverUrl: group.cover, posterPath: group.cover, backdropPath: group.cover, link: raw, childItems: children };
   }
   var sm2 = raw.match(/^hg320-season:(\d+):(\d+)$/);
   if (sm2) {
